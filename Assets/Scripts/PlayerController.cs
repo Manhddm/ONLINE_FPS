@@ -1,54 +1,144 @@
-using System;
-using System.Collections;
-using System.Collections.Generic;
 using UnityEngine;
 
 public class PlayerController : MonoBehaviour
 {
-    [SerializeField]
-    private Transform viewPoint;
-    [SerializeField] float mouseSensitivity = 1f;
-    private float verticalRotStore = 0f;
-    private Vector2 mouseInput;
-    public bool invertLook = false;
+    // ===== Inspector / Camera & View =====
+    [SerializeField] private Transform viewPoint;
+    [SerializeField] private float mouseSensitivity = 1f;
+    public bool invertLook ;
     
+    // ===== Inspector / Movement =====
     [Header("Movement data")]
     [SerializeField] private float walkSpeed = 3f;
     [SerializeField] private float runSpeed = 6f;
-    [SerializeField] bool running = true;
-    private Vector3 moveDir;
-    public CharacterController controller;
+    [SerializeField] private float jumpForce = 5f;
 
+    // ===== Inspector / Ground Check =====
+    public Transform groundCheckPoint;
+    public bool isGrounded;
+    public LayerMask groundLayer;
+
+    // ===== Runtime / Cached =====
+    public CharacterController controller;
+    private Camera playerCamera;
+
+    // ===== Runtime / State =====
+    [SerializeField] private bool running = true;
+    private float gravityMod = 2.5f;
+    private float verticalRotStore = 0f;
+    private Vector2 mouseInput;
+    private Vector3 moveDir, movement;
+    
+    public GameObject bulletImpact;
+    public float timeBetweenShots = 0.1f;
+    private float shotCounter;
+    
+    public float maxHeat = 10f;
+    public float heatPerShot = 1f;
+    public float coolRate = 4f;
+    public float overheatCoolRate = 5f;
+    private float heatCounter ;
+    private bool overheated;
+
+    // ===== Properties =====
+    private float ActualSpeed
+    {
+        get
+        {
+            if (running) return runSpeed;
+            return walkSpeed;
+        }
+    }
+
+    // ===== Unity Callbacks =====
     private void Awake()
     {
         controller = GetComponent<CharacterController>();
     }
 
-    void Start()
+    private void Start()
     {
         Cursor.lockState = CursorLockMode.Locked;
+        playerCamera = Camera.main;
     }
 
-    // Update is called once per frame
-    void Update()
+    private void Update()
     {
-        mouseInput = new Vector2(Input.GetAxisRaw("Mouse X"), Input.GetAxisRaw("Mouse Y")) * mouseSensitivity ;
+        if (Input.GetKeyDown(KeyCode.Escape))
+        {
+            Cursor.lockState = CursorLockMode.None;
+        }
+        else if (Input.GetMouseButtonDown(0) && Cursor.lockState == CursorLockMode.None)
+        {
+            Cursor.lockState = CursorLockMode.Locked;
+        }
+
+        mouseInput = new Vector2(Input.GetAxisRaw("Mouse X"), Input.GetAxisRaw("Mouse Y")) * mouseSensitivity;
         ProcessLookInput();
+        if (!overheated)
+        {
+            if (Cursor.lockState == CursorLockMode.Locked)
+            {
+                if (Input.GetMouseButtonDown(0))
+                {
+                    Shoot();
+                }
+            }
+
+            if (Input.GetMouseButton(0))
+            {
+                shotCounter -= Time.deltaTime;
+                if (shotCounter <= 0)
+                {
+                    Shoot();
+                }
+            }
+
+            heatCounter -= coolRate*Time.deltaTime;
+        }
+        else
+        {
+            heatCounter -= overheatCoolRate*Time.deltaTime;
+            if (heatCounter <= 0)
+            {
+                heatCounter = 0;
+                overheated = false;
+            }
+        }
+
+        if (heatCounter < 0)
+        {
+            heatCounter = 0f;
+        }
+        
+
+        isGrounded = Physics.Raycast(groundCheckPoint.position, Vector3.down, 0.2f, groundLayer);
         Movement();
     }
 
+    private void LateUpdate()
+    {
+        playerCamera.transform.position = viewPoint.position;
+        playerCamera.transform.rotation = viewPoint.rotation;
+    }
+
+    // ===== Private Methods =====
     private void ProcessLookInput()
     {
         transform.Rotate(Vector3.up * mouseInput.x);
+
         verticalRotStore -= mouseInput.y;
         if (invertLook)
         {
             verticalRotStore += mouseInput.y * 2;
         }
         verticalRotStore = Mathf.Clamp(verticalRotStore, -80f, 60f);
-     
-        
-        viewPoint.rotation = Quaternion.Euler(verticalRotStore, viewPoint.rotation.eulerAngles.y, viewPoint.rotation.eulerAngles.z);
+
+        viewPoint.rotation = Quaternion.Euler(
+            verticalRotStore,
+            viewPoint.rotation.eulerAngles.y,
+            viewPoint.rotation.eulerAngles.z
+        );
     }
 
     private void Movement()
@@ -56,20 +146,60 @@ public class PlayerController : MonoBehaviour
         float ix = Input.GetAxisRaw("Horizontal");
         float iz = Input.GetAxisRaw("Vertical");
         moveDir = new Vector3(ix, 0f, iz);
-        //controller.Move(walkSpeed*moveDir*Time.deltaTime);
-        float currentSpeed;
+
         if (Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift))
         {
-            currentSpeed = walkSpeed;
             running = false;
         }
         else
         {
-            currentSpeed = runSpeed;
             running = true;
         }
-        Vector3 moveVector = transform.forward*moveDir.z + transform.right*moveDir.x;
-        controller.Move(moveVector*currentSpeed*Time.deltaTime);
-        //transform.position += moveVector*currentSpeed*Time.deltaTime;
+
+        float yVel = movement.y;
+        movement = (transform.forward * moveDir.z + transform.right * moveDir.x).normalized * ActualSpeed;
+
+        if (controller.isGrounded)
+        {
+            movement.y = 0f;
+        }
+        else
+        {
+            movement.y = yVel;
+        }
+
+        if (Input.GetButtonDown("Jump") && isGrounded)
+        {
+            movement.y = jumpForce;
+        }
+
+        ApplyGravity();
+        controller.Move(movement * Time.deltaTime);
+        // transform.position += moveVector * currentSpeed * Time.deltaTime;
+    }
+
+    private void ApplyGravity()
+    {
+        movement.y += Physics.gravity.y * Time.deltaTime * gravityMod;
+    }
+
+    private void Shoot()
+    {
+        Ray ray = playerCamera.ViewportPointToRay(new Vector3(0.5f, 0.5f, 0));
+        ray.origin = playerCamera.transform.position;
+
+        if (Physics.Raycast(ray, out RaycastHit hit))
+        {
+            GameObject butlletImpactObject = Instantiate(bulletImpact, hit.point + (hit.normal * 0.002f), Quaternion.LookRotation(hit.normal, Vector3.up));
+            Destroy(butlletImpactObject, 5f);
+        }
+
+        shotCounter = timeBetweenShots;
+        heatCounter += heatPerShot;
+        if (heatCounter >= maxHeat)
+        {
+            heatCounter = maxHeat;
+            overheated = true;
+        }
     }
 }
